@@ -21,7 +21,7 @@ start:
 	vault server -dev -dev-root-token-id=root -dev-plugin-dir=./vault/plugins
 
 enable:
-	vault secrets enable -path=streamnative vault-plugin-streamnative
+	vault secrets enable -path=snio vault-plugin-streamnative
 
 clean:
 	rm -f ./vault/plugins/vault-plugin-streamnative

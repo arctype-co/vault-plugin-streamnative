@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
+	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/hashicorp/errwrap"
@@ -16,7 +19,7 @@ import (
 type backend struct {
 	*framework.Backend
 
-	store map[string][]byte
+	keyFiles map[string][]byte
 }
 
 var _ logical.Factory = Factory
@@ -41,11 +44,11 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 
 func newBackend() (*backend, error) {
 	b := &backend{
-		store: make(map[string][]byte),
+		keyFiles: make(map[string][]byte),
 	}
 
 	b.Backend = &framework.Backend{
-		Help:        strings.TrimSpace(mockHelp),
+		Help:        strings.TrimSpace(helpText),
 		BackendType: logical.TypeLogical,
 		Paths: framework.PathAppend(
 			b.paths(),
@@ -100,43 +103,79 @@ func (b *backend) handleExistenceCheck(ctx context.Context, req *logical.Request
 }
 
 func (b *backend) handleRead(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
-	if req.ClientToken == "" {
-		return nil, fmt.Errorf("client token empty")
-	}
-
 	path := data.Get("path").(string)
 
 	// Decode the data
-	var rawData map[string]interface{}
-	fetchedData := b.store[req.ClientToken+"/"+path]
-	if fetchedData == nil {
+	var json map[string]interface{}
+	secretBytes := b.keyFiles[path]
+	if secretBytes == nil {
 		resp := logical.ErrorResponse("No value at %v%v", req.MountPoint, path)
 		return resp, nil
 	}
 
-	if err := jsonutil.DecodeJSON(fetchedData, &rawData); err != nil {
+	b.Logger().Info("Read path", "path", path, "data", secretBytes)
+
+	if err := jsonutil.DecodeJSON(secretBytes, &json); err != nil {
+		b.Logger().Error("JSON decoding failed", "error", err)
 		return nil, errwrap.Wrapf("json decoding failed: {{err}}", err)
+	}
+
+	// snctl -n <organization> auth get-token <cluster> -f <key.json>
+	keyFileBytes := json["key-file"]
+	org := json["organization"]
+	cluster := json["cluster"]
+	if keyFileBytes == nil {
+		resp := logical.ErrorResponse("No 'key-file' set")
+		return resp, nil
+	}
+	if org == nil {
+		resp := logical.ErrorResponse("No 'organization' set")
+		return resp, nil
+	}
+	if cluster == nil {
+		resp := logical.ErrorResponse("No 'cluster' set")
+		return resp, nil
+	}
+
+	// TempFile is always created with 0600 permissions
+	tmpKeyFile, err := ioutil.TempFile(os.TempDir(), "snio-key-*.json")
+	if err != nil {
+		b.Logger().Error("Failed to open temp file", "error", err)
+		return nil, err
+	}
+	defer os.Remove(tmpKeyFile.Name())
+	ioutil.WriteFile(tmpKeyFile.Name(), []byte(keyFileBytes.(string)), 0600)
+	cmd := exec.Command("snctl", "-n", org.(string), "auth", "get-token", cluster.(string), "-f", tmpKeyFile.Name())
+	token, err := cmd.Output()
+	if err != nil {
+		b.Logger().Error("Failed to run `snctl auth get-token`", "error", err)
+		return nil, err
+	}
+
+	out := map[string]interface{}{
+		"token": token,
 	}
 
 	// Generate the response
 	resp := &logical.Response{
-		Data: rawData,
+		Data: out,
 	}
 
 	return resp, nil
 }
 
 func (b *backend) handleWrite(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
-	if req.ClientToken == "" {
-		return nil, fmt.Errorf("client token empty")
-	}
-
-	// Check to make sure that kv pairs provided
-	if len(req.Data) == 0 {
-		return nil, fmt.Errorf("data must be provided to store in secret")
-	}
-
 	path := data.Get("path").(string)
+
+	if len(req.Data) == 0 {
+		b.Logger().Info("Clearing service account", "path", path)
+		// clear the key file
+		delete(b.keyFiles, path)
+		return nil, nil
+	}
+
+	// Example key file
+	// {"type":"sn_service_account","client_id":"...","client_secret":"...","client_email":"...","issuer_url":"https://auth.streamnative.cloud"}
 
 	// JSON encode the data
 	buf, err := json.Marshal(req.Data)
@@ -144,25 +183,22 @@ func (b *backend) handleWrite(ctx context.Context, req *logical.Request, data *f
 		return nil, errwrap.Wrapf("json encoding failed: {{err}}", err)
 	}
 
+	b.Logger().Info("Saving service account", "data", buf)
 	// Store kv pairs in map at specified path
-	b.store[req.ClientToken+"/"+path] = buf
+	b.keyFiles[path] = buf
 
 	return nil, nil
 }
 
 func (b *backend) handleDelete(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
-	if req.ClientToken == "" {
-		return nil, fmt.Errorf("client token empty")
-	}
-
 	path := data.Get("path").(string)
 
 	// Remove entry for specified path
-	delete(b.store, req.ClientToken+"/"+path)
+	delete(b.keyFiles, path)
 
 	return nil, nil
 }
 
-const mockHelp = `
-The Mock backend is a dummy secrets backend that stores kv pairs in a map.
+const helpText = `
+The StreamNative backend generates Pulsar JWTs on-demand using the StreamNative API.
 `
