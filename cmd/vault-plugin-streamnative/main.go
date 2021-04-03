@@ -4,7 +4,7 @@ import (
 	"os"
 
 	"github.com/hashicorp/go-hclog"
-	mock "github.com/hashicorp/vault-guides/plugins/vault-plugin-streamnative"
+	streamnative "github.com/hashicorp/vault-guides/plugins/vault-plugin-streamnative"
 	"github.com/hashicorp/vault/api"
 	"github.com/hashicorp/vault/sdk/plugin"
 )
@@ -18,7 +18,7 @@ func main() {
 	tlsProviderFunc := api.VaultPluginTLSProvider(tlsConfig)
 
 	err := plugin.Serve(&plugin.ServeOpts{
-		BackendFactoryFunc: mock.Factory,
+		BackendFactoryFunc: streamnative.Factory,
 		TLSProviderFunc:    tlsProviderFunc,
 	})
 	if err != nil {
