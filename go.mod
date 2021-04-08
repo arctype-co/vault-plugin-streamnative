@@ -1,4 +1,4 @@
-module github.com/hashicorp/vault-guides/plugins/vault-plugin-streamnative
+module github.com/arctype-co/vault-plugin-streamnative
 
 go 1.12
 

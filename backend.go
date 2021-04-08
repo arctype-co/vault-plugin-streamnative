@@ -24,6 +24,14 @@ type backend struct {
 
 var _ logical.Factory = Factory
 
+func GetSnctl() string {
+  snctl, snctlSet := os.LookupEnv("SNCTL_PATH")
+  if snctlSet {
+    return snctl
+  }
+  return "snctl"
+}
+
 // Factory configures and returns Mock backends
 func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
 	b, err := newBackend()
@@ -145,7 +153,7 @@ func (b *backend) handleRead(ctx context.Context, req *logical.Request, data *fr
 	}
 	defer os.Remove(tmpKeyFile.Name())
 	ioutil.WriteFile(tmpKeyFile.Name(), []byte(keyFileBytes.(string)), 0600)
-	cmd := exec.Command("snctl", "-n", org.(string), "auth", "get-token", cluster.(string), "-f", tmpKeyFile.Name())
+	cmd := exec.Command(GetSnctl(), "-n", org.(string), "auth", "get-token", cluster.(string), "-f", tmpKeyFile.Name())
 	token, err := cmd.Output()
 	if err != nil {
 		b.Logger().Error("Failed to run `snctl auth get-token`", "error", err)
