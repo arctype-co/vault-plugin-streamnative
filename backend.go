@@ -18,18 +18,16 @@ import (
 // backend wraps the backend framework and adds a map for storing key value pairs
 type backend struct {
 	*framework.Backend
-
-	keyFiles map[string][]byte
 }
 
 var _ logical.Factory = Factory
 
 func GetSnctl() string {
-  snctl, snctlSet := os.LookupEnv("SNCTL_PATH")
-  if snctlSet {
-    return snctl
-  }
-  return "snctl"
+	snctl, snctlSet := os.LookupEnv("SNCTL_PATH")
+	if snctlSet {
+		return snctl
+	}
+	return "snctl"
 }
 
 // Factory configures and returns Mock backends
@@ -51,9 +49,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 }
 
 func newBackend() (*backend, error) {
-	b := &backend{
-		keyFiles: make(map[string][]byte),
-	}
+	b := &backend{}
 
 	b.Backend = &framework.Backend{
 		Help:        strings.TrimSpace(helpText),
@@ -115,7 +111,12 @@ func (b *backend) handleRead(ctx context.Context, req *logical.Request, data *fr
 
 	// Decode the data
 	var json map[string]interface{}
-	secretBytes := b.keyFiles[path]
+	ent, err := req.Storage.Get(ctx, path)
+	if err != nil {
+		b.Logger().Error("Reading from storage failed", "error", err)
+		return nil, errwrap.Wrapf("Reading from storage failed: {{err}}", err)
+	}
+	secretBytes := ent.Value
 	if secretBytes == nil {
 		resp := logical.ErrorResponse("No value at %v%v", req.MountPoint, path)
 		return resp, nil
@@ -178,7 +179,11 @@ func (b *backend) handleWrite(ctx context.Context, req *logical.Request, data *f
 	if len(req.Data) == 0 {
 		b.Logger().Info("Clearing service account", "path", path)
 		// clear the key file
-		delete(b.keyFiles, path)
+		err := req.Storage.Delete(ctx, path)
+		if err != nil {
+			b.Logger().Error("Deleting from storage failed", "error", err)
+			return nil, errwrap.Wrapf("Deleting from storage failed: {{err}}", err)
+		}
 		return nil, nil
 	}
 
@@ -193,7 +198,15 @@ func (b *backend) handleWrite(ctx context.Context, req *logical.Request, data *f
 
 	b.Logger().Info("Saving service account", "data", buf)
 	// Store kv pairs in map at specified path
-	b.keyFiles[path] = buf
+	ent := &logical.StorageEntry{
+		Key:   path,
+		Value: buf,
+	}
+	err = req.Storage.Put(ctx, ent)
+	if err != nil {
+		b.Logger().Error("Putting to storage failed", "error", err)
+		return nil, errwrap.Wrapf("Putting to storage failed: {{err}}", err)
+	}
 
 	return nil, nil
 }
@@ -202,7 +215,11 @@ func (b *backend) handleDelete(ctx context.Context, req *logical.Request, data *
 	path := data.Get("path").(string)
 
 	// Remove entry for specified path
-	delete(b.keyFiles, path)
+	err := req.Storage.Delete(ctx, path)
+	if err != nil {
+		b.Logger().Error("Deleting from storage failed", "error", err)
+		return nil, errwrap.Wrapf("Deleting from storage failed: {{err}}", err)
+	}
 
 	return nil, nil
 }

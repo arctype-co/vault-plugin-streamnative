@@ -10,7 +10,7 @@ import (
 )
 
 func main() {
-  logger := hclog.New(&hclog.LoggerOptions{})
+	logger := hclog.New(&hclog.LoggerOptions{})
 	logger.Info("Using snctl", "snctl", streamnative.GetSnctl())
 	apiClientMeta := &api.PluginAPIClientMeta{}
 	flags := apiClientMeta.FlagSet()
