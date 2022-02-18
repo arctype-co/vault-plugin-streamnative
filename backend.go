@@ -122,7 +122,7 @@ func (b *backend) handleRead(ctx context.Context, req *logical.Request, data *fr
 		return resp, nil
 	}
 
-	b.Logger().Info("Read path", "path", path, "data", secretBytes)
+	b.Logger().Debug("Read path", "path", path)
 
 	if err := jsonutil.DecodeJSON(secretBytes, &json); err != nil {
 		b.Logger().Error("JSON decoding failed", "error", err)
@@ -155,9 +155,9 @@ func (b *backend) handleRead(ctx context.Context, req *logical.Request, data *fr
 	defer os.Remove(tmpKeyFile.Name())
 	ioutil.WriteFile(tmpKeyFile.Name(), []byte(keyFileBytes.(string)), 0600)
 	cmd := exec.Command(GetSnctl(), "-n", org.(string), "auth", "get-token", cluster.(string), "-f", tmpKeyFile.Name())
-	token, err := cmd.Output()
+	token, err := cmd.CombinedOutput()
 	if err != nil {
-		b.Logger().Error("Failed to run `snctl auth get-token`", "error", err)
+		b.Logger().Error("Failed to run `snctl auth get-token`", "error", err, "out", token)
 		return nil, err
 	}
 
@@ -196,7 +196,7 @@ func (b *backend) handleWrite(ctx context.Context, req *logical.Request, data *f
 		return nil, errwrap.Wrapf("json encoding failed: {{err}}", err)
 	}
 
-	b.Logger().Info("Saving service account", "data", buf)
+	b.Logger().Info("Saving service account")
 	// Store kv pairs in map at specified path
 	ent := &logical.StorageEntry{
 		Key:   path,
