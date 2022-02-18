@@ -129,6 +129,11 @@ func (b *backend) handleRead(ctx context.Context, req *logical.Request, data *fr
 		return nil, errwrap.Wrapf("json decoding failed: {{err}}", err)
 	}
 
+	if err := b.requireSnctlConfig(); err != nil {
+		b.Logger().Error("Initializing snctl config failed", "error", err)
+		return nil, err
+	}
+
 	// snctl -n <organization> auth get-token <cluster> -f <key.json>
 	keyFileBytes := json["key-file"]
 	org := json["organization"]
@@ -154,6 +159,12 @@ func (b *backend) handleRead(ctx context.Context, req *logical.Request, data *fr
 	}
 	defer os.Remove(tmpKeyFile.Name())
 	ioutil.WriteFile(tmpKeyFile.Name(), []byte(keyFileBytes.(string)), 0600)
+
+	if err := b.activateServiceAccount(tmpKeyFile.Name()); err != nil {
+		b.Logger().Error("Activating service account failed", "error", err)
+		return nil, err
+	}
+
 	cmd := exec.Command(GetSnctl(), "-n", org.(string), "auth", "get-token", cluster.(string), "-f", tmpKeyFile.Name())
 	token, err := cmd.CombinedOutput()
 	if err != nil {
@@ -184,10 +195,8 @@ func (b *backend) initializeSnctlConfig() error {
 }
 
 // Initialize once if config dir does not exist.
-// Also set a dummy oauth key. The dummy key is overwritten with per-request data.
-// [sudo -u vault] $(LIBEXEC)/snctl config init
-// [sudo -u vault] $(LIBEXEC)/snctl auth activate-service-account --key-file ~/service-account-key.json
-func (b *backend) requireSnctlConfig(ctx context.Context) error {
+// snctl config init
+func (b *backend) requireSnctlConfig() error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return errwrap.Wrapf("No user HOME directory: {{err}}", err)
@@ -200,6 +209,17 @@ func (b *backend) requireSnctlConfig(ctx context.Context) error {
 		err = b.initializeSnctlConfig()
 	}
 	// Return remaining error, if any.
+	return err
+}
+
+func (b *backend) activateServiceAccount(secretKey string) error {
+	// Set a dummy oauth key. The dummy key is overwritten with per-request data.
+	// snctl auth activate-service-account --key-file ~/service-account-key.json
+	cmd := exec.Command(GetSnctl(), "auth", "activate-service-account", "--key-file", secretKey)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		b.Logger().Error("Failed to run `snctl auth activate-service-account`", "error", err, "out", out)
+	}
 	return err
 }
 
