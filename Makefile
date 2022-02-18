@@ -18,7 +18,7 @@ build:
 	GOOS=$(OS) GOARCH="$(GOARCH)" go build -o vault/plugins/vault-plugin-streamnative cmd/vault-plugin-streamnative/main.go
 
 start:
-	vault server -dev -dev-root-token-id=root -dev-plugin-dir=./vault/plugins
+	vault server -log-level=debug -dev -dev-root-token-id=root -dev-plugin-dir=./vault/plugins
 
 enable:
 	vault secrets enable -path=snio vault-plugin-streamnative
