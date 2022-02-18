@@ -173,6 +173,36 @@ func (b *backend) handleRead(ctx context.Context, req *logical.Request, data *fr
 	return resp, nil
 }
 
+func (b *backend) initializeSnctlConfig() error {
+	b.Logger().Info("Initializing snctl config")
+	cmd := exec.Command(GetSnctl(), "config", "init")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		b.Logger().Error("Failed to run `snctl config init`", "error", err, "out", out)
+	}
+	return err
+}
+
+// Initialize once if config dir does not exist.
+// Also set a dummy oauth key. The dummy key is overwritten with per-request data.
+// [sudo -u vault] $(LIBEXEC)/snctl config init
+// [sudo -u vault] $(LIBEXEC)/snctl auth activate-service-account --key-file ~/service-account-key.json
+func (b *backend) requireSnctlConfig(ctx context.Context) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return errwrap.Wrapf("No user HOME directory: {{err}}", err)
+	}
+	path := home + "/.snctl"
+	// TODO: Enter Mutex here
+	_, err = os.ReadDir(path)
+	if err != nil {
+		// Clear error and attempt to initialize
+		err = b.initializeSnctlConfig()
+	}
+	// Return remaining error, if any.
+	return err
+}
+
 func (b *backend) handleWrite(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
 	path := data.Get("path").(string)
 
