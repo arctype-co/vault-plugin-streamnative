@@ -166,19 +166,19 @@ func (b *backend) handleRead(ctx context.Context, req *logical.Request, data *fr
 	}
 
 	cmd := exec.Command(GetSnctl(), "-n", org.(string), "auth", "get-token", cluster.(string), "-f", tmpKeyFile.Name())
-	token, err := cmd.CombinedOutput()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		b.Logger().Error("Failed to run `snctl auth get-token`", "error", err, "out", token)
+		b.Logger().Error("Failed to run `snctl auth get-token`", "error", err, "out", out)
 		return nil, err
 	}
 
-	out := map[string]interface{}{
-		"token": token,
+	outData := map[string]interface{}{
+		"token": string(out),
 	}
 
 	// Generate the response
 	resp := &logical.Response{
-		Data: out,
+		Data: outData,
 	}
 
 	return resp, nil
