@@ -7,7 +7,10 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"reflect"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/errwrap"
 	"github.com/hashicorp/vault/sdk/framework"
@@ -106,50 +109,98 @@ func (b *backend) handleExistenceCheck(ctx context.Context, req *logical.Request
 	return out != nil, nil
 }
 
-func (b *backend) handleRead(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
-	path := data.Get("path").(string)
-
-	// Decode the data
-	var json map[string]interface{}
-	ent, err := req.Storage.Get(ctx, path)
-	if err != nil {
-		b.Logger().Error("Reading from storage failed", "error", err)
-		return nil, errwrap.Wrapf("Reading from storage failed: {{err}}", err)
+func (b *backend) readCachedToken(data map[string]interface{}, path string) *string {
+	// TTL in whole seconds
+	ttl, hasTtl := data["ttl"]
+	if hasTtl {
+		cachedAt, hasCachedAt := data["cachedAt"]
+		if hasCachedAt {
+			token, hasToken := data["cachedToken"]
+			if hasToken {
+				ttl64, err := ttl.(json.Number).Int64()
+				if err != nil {
+					panic("ttl is not integer")
+				}
+				cachedAt64, err := cachedAt.(json.Number).Int64()
+				if err != nil {
+					panic("cachedAt is not integer")
+				}
+				now := time.Now().UnixMilli()
+				expiresAt := cachedAt64 + (ttl64 * 1000)
+				if now < expiresAt {
+					tokenStr := token.(string)
+					return &tokenStr
+				}
+			}
+		}
 	}
-	secretBytes := ent.Value
-	if secretBytes == nil {
-		resp := logical.ErrorResponse("No value at %v%v", req.MountPoint, path)
-		return resp, nil
+
+	return nil
+}
+
+func (b *backend) saveCachedToken(ctx context.Context, req *logical.Request, path string,
+	data map[string]interface{}, token string) error {
+
+	_, hasTtl := data["ttl"]
+
+	// If no ttl, do not cache tokens.
+	if !hasTtl {
+		return nil
 	}
 
-	b.Logger().Debug("Read path", "path", path)
+	data["cachedAt"] = time.Now().UnixMilli()
+	data["cachedToken"] = token
 
-	if err := jsonutil.DecodeJSON(secretBytes, &json); err != nil {
-		b.Logger().Error("JSON decoding failed", "error", err)
-		return nil, errwrap.Wrapf("json decoding failed: {{err}}", err)
+	buf, err := json.Marshal(data)
+	if err == nil {
+		// Store kv pairs in map at specified path
+		ent := &logical.StorageEntry{
+			Key:   path,
+			Value: buf,
+		}
+		err = req.Storage.Put(ctx, ent)
+		if err == nil {
+			b.Logger().Debug("Token cache saved", "path", path)
+		} else {
+			b.Logger().Error("Saving to storage failed", "error", err)
+		}
+	} else {
+		b.Logger().Error("JSON encoding failed", "error", err)
 	}
+
+	return err
+}
+
+func validateKeyData(data map[string]interface{}) *logical.Response {
+	keyFileBytes := data["key-file"]
+	org := data["organization"]
+	cluster := data["cluster"]
+	if keyFileBytes == nil {
+		resp := logical.ErrorResponse("No 'key-file' set")
+		return resp
+	}
+	if org == nil {
+		resp := logical.ErrorResponse("No 'organization' set")
+		return resp
+	}
+	if cluster == nil {
+		resp := logical.ErrorResponse("No 'cluster' set")
+		return resp
+	}
+	return nil
+}
+
+func (b *backend) readNewToken(ctx context.Context, req *logical.Request, path string, data map[string]interface{}) (*string, error) {
+	b.Logger().Debug("Reading new token")
 
 	if err := b.requireSnctlConfig(); err != nil {
 		b.Logger().Error("Initializing snctl config failed", "error", err)
 		return nil, err
 	}
 
-	// snctl -n <organization> auth get-token <cluster> -f <key.json>
-	keyFileBytes := json["key-file"]
-	org := json["organization"]
-	cluster := json["cluster"]
-	if keyFileBytes == nil {
-		resp := logical.ErrorResponse("No 'key-file' set")
-		return resp, nil
-	}
-	if org == nil {
-		resp := logical.ErrorResponse("No 'organization' set")
-		return resp, nil
-	}
-	if cluster == nil {
-		resp := logical.ErrorResponse("No 'cluster' set")
-		return resp, nil
-	}
+	keyFileBytes := data["key-file"]
+	org := data["organization"]
+	cluster := data["cluster"]
 
 	// TempFile is always created with 0600 permissions
 	tmpKeyFile, err := ioutil.TempFile(os.TempDir(), "snio-key-*.json")
@@ -171,9 +222,54 @@ func (b *backend) handleRead(ctx context.Context, req *logical.Request, data *fr
 		b.Logger().Error("Failed to run `snctl auth get-token`", "error", err, "out", out)
 		return nil, err
 	}
+	token := string(out)
+
+	err = b.saveCachedToken(ctx, req, path, data, token)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &token, nil
+}
+
+func (b *backend) handleRead(ctx context.Context, req *logical.Request, fieldData *framework.FieldData) (*logical.Response, error) {
+	path := fieldData.Get("path").(string)
+
+	// Decode the data
+	var data map[string]interface{}
+	ent, err := req.Storage.Get(ctx, path)
+	if err != nil {
+		b.Logger().Error("Reading from storage failed", "error", err)
+		return nil, errwrap.Wrapf("Reading from storage failed: {{err}}", err)
+	}
+
+	secretBytes := ent.Value
+	if secretBytes == nil {
+		resp := logical.ErrorResponse("No value at %v%v", req.MountPoint, path)
+		return resp, nil
+	}
+
+	if err := jsonutil.DecodeJSON(secretBytes, &data); err != nil {
+		b.Logger().Error("JSON decoding failed", "error", err)
+		return nil, errwrap.Wrapf("json decoding failed: {{err}}", err)
+	}
+
+	if invalidResponse := validateKeyData(data); invalidResponse != nil {
+		return invalidResponse, nil
+	}
+
+	token := b.readCachedToken(data, path)
+
+	if token == nil {
+		token, err = b.readNewToken(ctx, req, path, data)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	outData := map[string]interface{}{
-		"token": string(out),
+		"token": *token,
 	}
 
 	// Generate the response
@@ -235,6 +331,35 @@ func (b *backend) handleWrite(ctx context.Context, req *logical.Request, data *f
 			return nil, errwrap.Wrapf("Deleting from storage failed: {{err}}", err)
 		}
 		return nil, nil
+	}
+
+	stringTtl, hasTtl := req.Data["ttl"]
+	if hasTtl {
+		var ttl64 int64 = 0
+		var err error = nil
+		switch stringTtl.(type) {
+		case int:
+			ttl64 = int64(stringTtl.(int))
+		case int64:
+			ttl64 = stringTtl.(int64)
+		case json.Number:
+			ttl64, err = stringTtl.(json.Number).Int64()
+		case float64:
+			ttl64 = int64(stringTtl.(float64))
+		case string:
+			ttl32, err2 := strconv.Atoi(stringTtl.(string))
+			if err2 == nil {
+				ttl64 = int64(ttl32)
+			} else {
+				err = err2
+			}
+		default:
+			return nil, fmt.Errorf("ttl is not a scalar: {{type}}", reflect.TypeOf(stringTtl).Name())
+		}
+		if err != nil {
+			return nil, errwrap.Wrapf("ttl is not an integer: {{err}}", err)
+		}
+		req.Data["ttl"] = ttl64
 	}
 
 	// Example key file
